@@ -1,0 +1,16 @@
+# Ignore environment and secret files
+.env
+
+# Ignore local files and folders
+__pycache__/
+uploads/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Ignore IDE and system files
+.vscode/
+.idea/
+.DS_Store
