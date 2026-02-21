@@ -20,7 +20,12 @@ app.add_middleware(
 )
 
 # Initialize Groq client
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in environment variables")
+
+client = Groq(api_key=GROQ_API_KEY)
 
 # Uploads directory
 UPLOAD_FOLDER = "uploads"
@@ -88,25 +93,28 @@ def translate_summary(text: str, target_lang: str) -> str:
 
 
 # -------------------- API ROUTES --------------------
+import uuid
+
 @app.post("/upload-report")
 async def upload_report(file: UploadFile = File(...), language: str = Form("en")):
-    """Main endpoint to upload, summarize, and translate lab reports."""
     try:
-        # Save uploaded file temporarily
-        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+        # Unique file name
+        unique_name = f"{uuid.uuid4()}_{file.filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_name)
+
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        # Extract text from PDF
         pdf_text = extract_text_from_pdf(file_path)
+
         if not pdf_text.strip():
             return {"summary": "No readable text found in the PDF file."}
 
-        # Generate English summary
         english_summary = generate_summary(pdf_text)
-
-        # Translate if user selected a different language
         final_summary = translate_summary(english_summary, language)
+
+        # Clean storage
+        os.remove(file_path)
 
         return {"summary": final_summary}
 
@@ -114,8 +122,13 @@ async def upload_report(file: UploadFile = File(...), language: str = Form("en")
         print("Error:", e)
         return {"summary": f"An error occurred: {str(e)}"}
 
-
 # -------------------- ROOT TEST ROUTE --------------------
 @app.get("/")
 def root():
     return {"message": "✅ Multilingual Lab Report Summarizer API running successfully with LLaMA 3.3!"}
+import uvicorn
+import os
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
