@@ -2,9 +2,9 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 import pdfplumber
 import os
+import uuid
 from groq import Groq
 from dotenv import load_dotenv
-
 # -------------------- Load Environment Variables --------------------
 load_dotenv()
 
