@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 python-multipart
-pymupdf
 pdfplumber
 groq
 python-dotenv
+pymupdf
+

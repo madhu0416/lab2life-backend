@@ -2,7 +2,7 @@
  "version": 2,
  "builds": [
   {
-   "src": "main.py",
+   "src": "index.py",
    "use": "@vercel/node",
    "config": { "includeFiles": ["dist/**"] }
   }
@@ -10,7 +10,8 @@
  "routes": [
   {
    "src": "/(.*)",
-   "dest": "main.py"
+   "dest": "index.py"
   }
  ]
 }
+
