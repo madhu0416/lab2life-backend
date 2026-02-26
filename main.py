@@ -13,12 +13,13 @@ app = FastAPI()
 # Enable CORS for frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (fine for local dev)
+    allow_origins=[
+        "https://lab2life-frontendd.vercel.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Initialize Groq client
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
