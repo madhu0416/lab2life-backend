@@ -14,6 +14,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
+import razorpay
 
 # -------------------- Load Environment Variables --------------------
 load_dotenv()
@@ -42,13 +43,22 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# -------------------- RAZORPAY --------------------
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+
+if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+    raise ValueError("Razorpay keys not found in environment variables")
+
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
 # -------------------- SECURITY --------------------
 SECRET_KEY = os.getenv("SECRET_KEY", "lab2life-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 12
 
 pwd_context = CryptContext(schemes=["bcrypt_sha256"], deprecated="auto")
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # -------------------- DATABASE --------------------
 DATABASE_URL = "sqlite:///./lab2life.db"
@@ -88,9 +98,9 @@ class Patient(Base):
     phone = Column(String(10), unique=True, nullable=False)
     email = Column(String(100), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    is_subscribed = Column(String(10), default="false")
 
     reports = relationship("Report", back_populates="patient")
-
 
 class Report(Base):
     __tablename__ = "reports"
@@ -117,6 +127,7 @@ Base.metadata.create_all(bind=engine)
 class AskDoctorRequest(BaseModel):
     question: str
     summary: str
+    language: str = "en"
 
 
 class RegisterRequest(BaseModel):
@@ -131,6 +142,10 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class CreateSubscriptionOrderRequest(BaseModel):
+    plan: str
 
 
 # -------------------- DATABASE HELPERS --------------------
@@ -161,6 +176,9 @@ def get_current_patient(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     token = credentials.credentials
 
     try:
@@ -291,9 +309,13 @@ Lab Report:
         }
 
 
-def generate_doctor_answer(question: str, summary: str) -> str:
+def generate_doctor_answer(question: str, summary: str, language: str = "en") -> str:
+    language_name = LANGUAGE_MAP.get(language, "English")
+
     prompt = f"""
 You are a helpful medical assistant.
+
+Answer in {language_name} language only.
 
 Use the report summary below and answer the user's question in simple, patient-friendly language.
 
@@ -308,6 +330,7 @@ Rules:
 - Do not give a final diagnosis.
 - Be safe and practical.
 - Suggest consulting a doctor when needed.
+- Respond ONLY in {language_name}.
 """
 
     try:
@@ -377,19 +400,101 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     token = create_access_token({"sub": str(patient.id)})
 
     return {
-        "access_token": token,
-        "token_type": "bearer",
-        "full_name": patient.full_name,
-    }
+    "access_token": token,
+    "token_type": "bearer",
+    "full_name": patient.full_name,
+    "is_subscribed": patient.is_subscribed,
+}
 
 
-# -------------------- PUBLIC UPLOAD ROUTE (NOT SAVED FOR ANONYMOUS USERS) --------------------
+@app.post("/create-subscription-order")
+def create_subscription_order(
+    data: CreateSubscriptionOrderRequest,
+    current_patient: Patient = Depends(get_current_patient),
+):
+    try:
+        if data.plan == "monthly":
+            amount = 19900  # ₹199 in paise
+        else:
+            raise HTTPException(status_code=400, detail="Invalid plan")
+
+        order_data = {
+            "amount": amount,
+            "currency": "INR",
+            "receipt": f"sub_{current_patient.id}_{uuid.uuid4().hex[:6]}",
+            "notes": {
+                "patient_id": str(current_patient.id),
+                "plan": data.plan,
+                "name": current_patient.full_name,
+            },
+        }
+
+        order = razorpay_client.order.create(data=order_data)
+
+        return {
+            "order_id": order["id"],
+            "amount": order["amount"],
+            "currency": order["currency"],
+            "key": RAZORPAY_KEY_ID,
+            "name": current_patient.full_name,
+            "email": current_patient.email,
+            "phone": current_patient.phone,
+        }
+
+    except Exception as e:
+        print("Razorpay Error:", e)
+        raise HTTPException(status_code=500, detail="Payment creation failed")
+
+@app.post("/verify-payment")
+def verify_payment(
+    payment_data: dict,
+    current_patient: Patient = Depends(get_current_patient),
+    db: Session = Depends(get_db),
+):
+    try:
+        razorpay_order_id = payment_data.get("razorpay_order_id")
+        razorpay_payment_id = payment_data.get("razorpay_payment_id")
+        razorpay_signature = payment_data.get("razorpay_signature")
+
+        if not razorpay_order_id or not razorpay_payment_id or not razorpay_signature:
+            raise HTTPException(status_code=400, detail="Missing payment details")
+
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": razorpay_order_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "razorpay_signature": razorpay_signature,
+        })
+
+        current_patient.is_subscribed = "true"
+        db.commit()
+
+        return {"message": "Payment verified and subscription activated successfully"}
+
+    except Exception as e:
+        print("Payment Verification Error:", e)
+        raise HTTPException(status_code=400, detail="Payment verification failed")
+# -------------------- PUBLIC UPLOAD ROUTE (SAVED ONLY FOR LOGGED-IN USERS) --------------------
 @app.post("/upload-report")
 async def upload_report(
     file: UploadFile = File(...),
     language: str = Form("en"),
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     file_path = None
+    current_patient = None
+
+    try:
+        if credentials:
+            token = credentials.credentials
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            patient_id = payload.get("sub")
+            if patient_id:
+                current_patient = db.query(Patient).filter(
+                    Patient.id == int(patient_id)
+                ).first()
+    except Exception:
+        current_patient = None
 
     try:
         if not file.filename.lower().endswith(".pdf"):
@@ -423,6 +528,25 @@ async def upload_report(
             }
 
         analysis = generate_report_analysis(pdf_text, language)
+
+        if current_patient:
+            report = Report(
+                patient_id=current_patient.id,
+                file_name=file.filename,
+                file_path=file_path,
+                language=language,
+                summary=analysis.get("summary", ""),
+                health_score=analysis.get("health_score", 0),
+                risk_level=analysis.get("risk_level", ""),
+                normal_factors=json.dumps(analysis.get("normal_factors", [])),
+                abnormal_factors=json.dumps(analysis.get("abnormal_factors", [])),
+                recommendations=json.dumps(analysis.get("recommendations", [])),
+                doctor_advice=analysis.get("doctor_advice", ""),
+            )
+
+            db.add(report)
+            db.commit()
+
         return analysis
 
     except Exception as e:
@@ -438,7 +562,7 @@ async def upload_report(
         }
 
     finally:
-        if file_path and os.path.exists(file_path):
+        if file_path and os.path.exists(file_path) and not current_patient:
             try:
                 os.remove(file_path)
             except Exception as cleanup_error:
@@ -452,18 +576,51 @@ async def ask_doctor(
     current_patient: Patient = Depends(get_current_patient),
 ):
     try:
-        answer = generate_doctor_answer(data.question, data.summary)
+        answer = generate_doctor_answer(
+            data.question,
+            data.summary,
+            data.language
+        )
         return {"answer": answer}
     except Exception as e:
         print("Ask Doctor Route Error:", e)
         return {"answer": f"An error occurred: {str(e)}"}
 
 
+@app.get("/my-reports")
+def get_my_reports(
+    current_patient: Patient = Depends(get_current_patient),
+    db: Session = Depends(get_db),
+):
+    reports = (
+        db.query(Report)
+        .filter(Report.patient_id == current_patient.id)
+        .order_by(Report.id.desc())
+        .all()
+    )
+
+    result = []
+    for report in reports:
+        result.append({
+            "file_name": report.file_name,
+            "summary": report.summary,
+            "health_score": report.health_score,
+            "risk_level": report.risk_level,
+            "normal_factors": json.loads(report.normal_factors) if report.normal_factors else [],
+            "abnormal_factors": json.loads(report.abnormal_factors) if report.abnormal_factors else [],
+            "recommendations": json.loads(report.recommendations) if report.recommendations else [],
+            "doctor_advice": report.doctor_advice,
+            "language": report.language,
+        })
+
+    return {"reports": result}
+
+
 # -------------------- ROOT TEST ROUTE --------------------
 @app.get("/")
 def root():
     return {
-        "message": "Lab2Life API is running successfully with public upload and protected Ask Doctor."
+        "message": "Lab2Life API is running successfully with public upload, protected Ask Doctor, and Razorpay order creation."
     }
 
 

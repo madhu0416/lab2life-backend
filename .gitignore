@@ -1,16 +1,47 @@
-# Ignore environment and secret files
+# 🔐 Environment & secrets
 .env
+.env.*
 
-# Ignore local files and folders
+# 🐍 Python cache & compiled files
 __pycache__/
-uploads/
 *.pyc
 *.pyo
 *.pyd
+
+# 🧪 Virtual environments (IMPORTANT)
+venv/
+.venv/
+env/
+
+# 📦 Database files
 *.db
 *.sqlite3
 
-# Ignore IDE and system files
+# 📁 Project-specific folders
+uploads/
+logs/
+
+# 🧠 IDE & system files
 .vscode/
 .idea/
 .DS_Store
+
+# 🧾 Build / distribution
+dist/
+build/
+*.egg-info/
+
+# 📊 Jupyter Notebook
+.ipynb_checkpoints/
+
+# 🧪 Testing
+.coverage
+htmlcov/
+
+# ⚛️ React (if frontend present)
+node_modules/
+build/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
