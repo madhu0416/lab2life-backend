@@ -223,7 +223,47 @@ def extract_text_from_pdf(file_path: str) -> str:
             text += page_text + "\n"
     return text.strip()
 
+def extract_text_from_image(file_path: str) -> str:
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+        import pytesseract
 
+        # Read image
+        img = cv2.imread(file_path)
+
+        # 🔥 1. Resize (VERY IMPORTANT → improves accuracy)
+        img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+        # 🔥 2. Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # 🔥 3. Noise removal (VERY IMPORTANT)
+        gray = cv2.fastNlMeansDenoising(gray, None, 30, 7, 21)
+
+        # 🔥 4. Adaptive Threshold (BEST for medical reports)
+        thresh = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11, 2
+        )
+
+        # 🔥 5. Morphological cleaning
+        kernel = np.ones((1, 1), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        # 🔥 6. OCR CONFIG (VERY IMPORTANT)
+        custom_config = r'--oem 3 --psm 6'
+
+        text = pytesseract.image_to_string(thresh, config=custom_config)
+
+        return text.strip()
+
+    except Exception as e:
+        print("OCR Error:", e)
+        return ""
 
 
 
@@ -532,50 +572,16 @@ async def upload_report(
             f.write(await file.read())
 
         # =========================================
-        # ✅ TEXT EXTRACTION
+        # ✅ TEXT EXTRACTION (CLEAN)
         # =========================================
-
         if filename.endswith(".pdf"):
             pdf_text = extract_text_from_pdf(file_path)
-
         else:
-            from PIL import Image
-            import pytesseract
-            import cv2
-            import numpy as np
-
-            # 🔥 Set Tesseract path (VERY IMPORTANT)
-            pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-            # ✅ Load image
-            image = cv2.imread(file_path)
-
-            # ✅ Convert to grayscale
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-            # ✅ Noise removal
-            gray = cv2.medianBlur(gray, 3)
-
-            # ✅ Thresholding (important for OCR)
-            thresh = cv2.adaptiveThreshold(
-                gray,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                11,
-                2,
-            )
-
-            # ✅ Optional resize (improves accuracy)
-            thresh = cv2.resize(thresh, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-
-            # ✅ OCR extraction
-            pdf_text = pytesseract.image_to_string(thresh, lang="eng")
+            pdf_text = extract_text_from_image(file_path)
 
         # =========================================
         # ✅ VALIDATION
         # =========================================
-
         if not pdf_text.strip():
             return {
                 "summary": "No readable text found.",
@@ -590,15 +596,16 @@ async def upload_report(
         # =========================================
         # ✅ AI ANALYSIS
         # =========================================
-
         analysis = generate_report_analysis(pdf_text, language)
-        
-        # ✅ SAVE REPORT TO DATABASE
+
+        # =========================================
+        # ✅ SAVE ONLY IF LOGGED IN
+        # =========================================
         if current_patient:
             report = Report(
                 patient_id=current_patient.id,
                 file_name=file.filename,
-                file_path=file_path,
+                file_path=file_path,  # ✅ store path (important)
                 language=language,
                 summary=analysis["summary"],
                 health_score=analysis["health_score"],
@@ -611,6 +618,7 @@ async def upload_report(
 
             db.add(report)
             db.commit()
+
         return analysis
 
     except Exception as e:
@@ -624,8 +632,6 @@ async def upload_report(
             "recommendations": [],
             "doctor_advice": "Processing failed.",
         }
-
-    
 # -------------------- PROTECTED ASK DOCTOR ROUTE --------------------
 @app.post("/ask-doctor")
 async def ask_doctor(
