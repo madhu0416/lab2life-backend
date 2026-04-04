@@ -206,6 +206,9 @@ def extract_text_from_pdf(file_path: str) -> str:
     return text.strip()
 
 
+
+
+
 def extract_json_from_response(content: str):
     try:
         return json.loads(content)
@@ -478,97 +481,115 @@ def verify_payment(
 async def upload_report(
     file: UploadFile = File(...),
     language: str = Form("en"),
-    db: Session = Depends(get_db),
-    credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     file_path = None
-    current_patient = None
 
     try:
-        if credentials:
-            token = credentials.credentials
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            patient_id = payload.get("sub")
-            if patient_id:
-                current_patient = db.query(Patient).filter(
-                    Patient.id == int(patient_id)
-                ).first()
-    except Exception:
-        current_patient = None
+        filename = file.filename.lower()
 
-    try:
-        if not file.filename.lower().endswith(".pdf"):
+        # ✅ Allow PDF + Images
+        if not (
+            filename.endswith(".pdf")
+            or filename.endswith(".jpg")
+            or filename.endswith(".jpeg")
+            or filename.endswith(".png")
+        ):
             return {
-                "summary": "Only PDF files are supported right now.",
+                "summary": "Only PDF or Image files are supported.",
                 "health_score": 0,
                 "risk_level": "Unknown",
                 "normal_factors": [],
                 "abnormal_factors": [],
                 "recommendations": [],
-                "doctor_advice": "Please upload a PDF lab report.",
+                "doctor_advice": "Upload PDF or image (JPG, PNG).",
             }
 
+        # ✅ Save file
         unique_name = f"{uuid.uuid4()}_{file.filename}"
         file_path = os.path.join(UPLOAD_FOLDER, unique_name)
 
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        pdf_text = extract_text_from_pdf(file_path)
+        # =========================================
+        # ✅ TEXT EXTRACTION
+        # =========================================
+
+        if filename.endswith(".pdf"):
+            pdf_text = extract_text_from_pdf(file_path)
+
+        else:
+            from PIL import Image
+            import pytesseract
+            import cv2
+            import numpy as np
+
+            # 🔥 Set Tesseract path (VERY IMPORTANT)
+            pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+            # ✅ Load image
+            image = cv2.imread(file_path)
+
+            # ✅ Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+            # ✅ Noise removal
+            gray = cv2.medianBlur(gray, 3)
+
+            # ✅ Thresholding (important for OCR)
+            thresh = cv2.adaptiveThreshold(
+                gray,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                11,
+                2,
+            )
+
+            # ✅ Optional resize (improves accuracy)
+            thresh = cv2.resize(thresh, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+            # ✅ OCR extraction
+            pdf_text = pytesseract.image_to_string(thresh, lang="eng")
+
+        # =========================================
+        # ✅ VALIDATION
+        # =========================================
 
         if not pdf_text.strip():
             return {
-                "summary": "No readable text found in the PDF file.",
+                "summary": "No readable text found.",
                 "health_score": 0,
                 "risk_level": "Unknown",
                 "normal_factors": [],
                 "abnormal_factors": [],
                 "recommendations": [],
-                "doctor_advice": "Please upload a clearer PDF report.",
+                "doctor_advice": "Upload a clearer file.",
             }
 
+        # =========================================
+        # ✅ AI ANALYSIS
+        # =========================================
+
         analysis = generate_report_analysis(pdf_text, language)
-
-        if current_patient:
-            report = Report(
-                patient_id=current_patient.id,
-                file_name=file.filename,
-                file_path=file_path,
-                language=language,
-                summary=analysis.get("summary", ""),
-                health_score=analysis.get("health_score", 0),
-                risk_level=analysis.get("risk_level", ""),
-                normal_factors=json.dumps(analysis.get("normal_factors", [])),
-                abnormal_factors=json.dumps(analysis.get("abnormal_factors", [])),
-                recommendations=json.dumps(analysis.get("recommendations", [])),
-                doctor_advice=analysis.get("doctor_advice", ""),
-            )
-
-            db.add(report)
-            db.commit()
 
         return analysis
 
     except Exception as e:
-        print("Upload Report Error:", e)
+        print("Upload Error:", e)
         return {
-            "summary": f"An error occurred: {str(e)}",
+            "summary": f"Error: {str(e)}",
             "health_score": 0,
             "risk_level": "Unknown",
             "normal_factors": [],
             "abnormal_factors": [],
             "recommendations": [],
-            "doctor_advice": "Unable to generate doctor advice.",
+            "doctor_advice": "Processing failed.",
         }
 
     finally:
-        if file_path and os.path.exists(file_path) and not current_patient:
-            try:
-                os.remove(file_path)
-            except Exception as cleanup_error:
-                print("File cleanup error:", cleanup_error)
-
-
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 # -------------------- PROTECTED ASK DOCTOR ROUTE --------------------
 @app.post("/ask-doctor")
 async def ask_doctor(
