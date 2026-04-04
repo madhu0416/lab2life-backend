@@ -172,6 +172,8 @@ def create_access_token(data: dict) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+# -------------------- AUTH HELPERS --------------------
+
 def get_current_patient(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
@@ -194,6 +196,22 @@ def get_current_patient(
         raise HTTPException(status_code=401, detail="Patient not found")
 
     return patient
+
+
+# ✅ ADD THIS FUNCTION HERE 👇
+def get_current_patient_optional(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+):
+    if not credentials:
+        return None
+
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        patient_id = payload.get("sub")
+        return db.query(Patient).filter(Patient.id == int(patient_id)).first()
+    except:
+        return None
 
 
 # -------------------- REPORT HELPERS --------------------
@@ -481,6 +499,8 @@ def verify_payment(
 async def upload_report(
     file: UploadFile = File(...),
     language: str = Form("en"),
+    current_patient: Patient = Depends(get_current_patient_optional),
+    db: Session = Depends(get_db),
 ):
     file_path = None
 
@@ -572,7 +592,25 @@ async def upload_report(
         # =========================================
 
         analysis = generate_report_analysis(pdf_text, language)
+        
+        # ✅ SAVE REPORT TO DATABASE
+        if current_patient:
+            report = Report(
+                patient_id=current_patient.id,
+                file_name=file.filename,
+                file_path=file_path,
+                language=language,
+                summary=analysis["summary"],
+                health_score=analysis["health_score"],
+                risk_level=analysis["risk_level"],
+                normal_factors=json.dumps(analysis["normal_factors"]),
+                abnormal_factors=json.dumps(analysis["abnormal_factors"]),
+                recommendations=json.dumps(analysis["recommendations"]),
+                doctor_advice=analysis["doctor_advice"],
+            )
 
+            db.add(report)
+            db.commit()
         return analysis
 
     except Exception as e:
@@ -587,9 +625,7 @@ async def upload_report(
             "doctor_advice": "Processing failed.",
         }
 
-    finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+    
 # -------------------- PROTECTED ASK DOCTOR ROUTE --------------------
 @app.post("/ask-doctor")
 async def ask_doctor(
